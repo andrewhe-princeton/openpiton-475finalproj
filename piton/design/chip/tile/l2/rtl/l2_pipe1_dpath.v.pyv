@@ -45,7 +45,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 <%
 import pyhplib
-import math
 from pyhplib import *
 
 L2_SIZE = CONFIG_L2_SIZE
@@ -53,14 +52,7 @@ L2_WAYS = CONFIG_L2_ASSOCIATIVITY # ANDREW: REMOVE CONFIG FILE EXTRACTION AND HA
 # L2_WAYS = 8
 L2_NUM_SETS = int(L2_SIZE / (L2_LINE_SIZE * L2_WAYS))
 L2_WAYS_WIDTH = (math.log(L2_WAYS,2))
-print('localparam L2_STATE_INDEX_WIDTH = ', math.ceil(math.log2(L2_NUM_SETS)), ';')
 %>
-
-localparam L2_FREQ_BITS = 6;
-localparam L2_FREQ_ARRAY_WIDTH = `L2_WAYS * L2_FREQ_BITS;
-localparam L2_FREQ_MAX_COUNT = (1 << L2_FREQ_BITS) - 1;
-localparam L2_FREQ_INIT_COUNT = 1; // Initial count for a newly filled line
-
 
 module l2_pipe1_dpath(
 
@@ -239,7 +231,6 @@ module l2_pipe1_dpath(
     input wire [`MSG_SRC_Y_WIDTH-1:0] my_nodeid_y_S4,
     input wire [`L2_P1_DATA_BUF_IN_WIDTH-1:0] reg_data_out_S4,
 
-    input wire [L2_FREQ_ARRAY_WIDTH-1:0] freq_data_S2,
 
     //Outputs from Stage 1
 
@@ -318,11 +309,7 @@ module l2_pipe1_dpath(
 
     output reg [`L2_STATE_INDEX_WIDTH-1:0] state_wr_addr_S4,
     output reg [`L2_STATE_ARRAY_WIDTH-1:0] state_data_in_S4,
-    output reg [`L2_STATE_ARRAY_WIDTH-1:0] state_data_mask_in_S4,
-
-    output reg [L2_STATE_INDEX_WIDTH-1:0] freq_wr_addr_S4, // Can share state address logic
-    output reg [L2_FREQ_ARRAY_WIDTH-1:0] freq_data_in_S4,
-    output reg [L2_FREQ_ARRAY_WIDTH-1:0] freq_data_mask_in_S4
+    output reg [`L2_STATE_ARRAY_WIDTH-1:0] state_data_mask_in_S4
 
 );
 
@@ -640,46 +627,18 @@ begin
     end
 end
 
-reg [L2_FREQ_ARRAY_WIDTH-1:0] freq_data_buf_S2_f;
-reg [L2_FREQ_ARRAY_WIDTH-1:0] freq_data_buf_S2_next;
-reg [L2_FREQ_ARRAY_WIDTH-1:0] freq_data_trans_S2;
-
-always @ *
-begin
-    if (!rst_n)
-    begin
-        freq_data_buf_S2_next = 0;
-    end
-    else if (stall_S2 && !stall_before_S2)
-    begin
-        freq_data_buf_S2_next = freq_data_S2;
-    end
-    else
-    begin
-        freq_data_buf_S2_next = freq_data_buf_S2_f;
-    end
-end
-
-always @ (posedge clk)
-begin
-    freq_data_buf_S2_f <= freq_data_buf_S2_next;
-end
-
-always @ *
-begin
-    if (stall_before_S2)
-    begin
-        freq_data_trans_S2 = freq_data_buf_S2_f;
-    end
-    else
-    begin
-        freq_data_trans_S2 = freq_data_S2;
-    end
-end
-
 
 wire [`L2_WAYS_WIDTH-1:0] l2_hit_way_sel_S2;
 reg [`L2_WAYS_WIDTH-1:0] l2_evict_way_sel_S2;
+reg [`L2_RB_BITS-1:0] l2_rb_bits_S2;
+reg [`L2_LRU_BITS-1:0] l2_lru_bits_S2;
+
+
+always @ *
+begin
+    l2_rb_bits_S2 = state_data_trans_S2[`L2_STATE_RB];
+    l2_lru_bits_S2 = state_data_trans_S2[`L2_STATE_LRU];
+end
 
 
 <%
@@ -689,10 +648,6 @@ print("reg [%d:0] tag_hit_way_S2;" % (L2_WAYS-1))
 print("\n")
 print("reg [`L2_STATE_WAY_WIDTH - 1:0] state_way_S2 [%d:0];" % (L2_WAYS-1) )
 print("\n")
-# << LFU START: DECLARE PER-WAY FREQUENCY COUNT >>
-print("reg [L2_FREQ_BITS-1:0] freq_count_way_S2 [%d:0];" % (L2_WAYS-1))
-print("\n")
-# << LFU END: DECLARE PER-WAY FREQUENCY COUNT >>
 %>
 
 
@@ -713,14 +668,6 @@ for i in range(L2_WAYS):
     print('''    state_way_S2[%d] = state_data_trans_S2[`L2_STATE_WAY_WIDTH * %d - 1:
 `L2_STATE_WAY_WIDTH * %d];''' % (i, i+1, i))
 %>
-end
-
-always @ *
-begin
-    integer way_idx_freq;
-    for (way_idx_freq = 0; way_idx_freq < `L2_WAYS; way_idx_freq = way_idx_freq + 1) begin
-        freq_count_way_S2[way_idx_freq] = freq_data_trans_S2[L2_FREQ_BITS * way_idx_freq +: L2_FREQ_BITS];
-    end
 end
 
 <%
@@ -766,51 +713,71 @@ begin
         l2_tag_hit_S2 = l2_tag_cmp_hit_S2;
     end
 end
+/*
+<%
+print("            l2_tag_hit_S2 = ",end="")
+for i in range(L2_WAYS):
+    if i != L2_WAYS-1:
+        print("tag_hit_way_S2[%d] || " % (i),end="")
+    else:
+        print("tag_hit_way_S2[%d];" % (i))
+%>
+    end
+end
+
+
 
 always @ *
 begin
-    reg found_invalid_S2;
-    reg [L2_FREQ_BITS-1:0] min_freq_S2;
-    reg [`L2_WAYS_WIDTH-1:0] min_freq_way_S2;
-    integer i;
-    reg way_is_valid;
-    reg first_valid_found;
+<%
+print("    l2_hit_way_sel_S2 = {`L2_WAYS_WIDTH{1'b0}};")
+for i in range(L2_WAYS):
+    print("    if (tag_hit_way_S2[%d])" % (i))
+    print("    begin")
+    print("        l2_hit_way_sel_S2 = `L2_WAY_%d;" % (i))
+    print("    end")
+%>
+end
+*/
 
-    found_invalid_S2 = 1'b0;
-    l2_evict_way_sel_S2 = `L2_WAY_0; // Default candidate
+//pseudo LRU algorithm
+always @ *
+begin
 
-    for (i = 0; i < `L2_WAYS; i = i + 1) begin
-        // Check if the way is invalid (assuming VD = 0 means invalid)
-        // Adjust this condition based on actual `L2_VD_* definitions if needed
-        way_is_valid = (state_way_S2[i][`L2_STATE_VD] == `L2_VD_CLEAN) || (state_way_S2[i][`L2_STATE_VD] == `L2_VD_DIRTY);
-        if (!way_is_valid) begin
-            l2_evict_way_sel_S2 = i[`L2_WAYS_WIDTH-1:0];
-            found_invalid_S2 = 1'b1;
-            break; // Found the first invalid way, use it
-        end
+<%
+for i in range(L2_WAYS):
+    if i == 0:
+        print("     if (!state_way_S2[%d][`L2_STATE_VD]) " % (i))
+    else:
+        print("     else if (!state_way_S2[%d][`L2_STATE_VD]) " % (i))
+    print("        begin")
+    print("            l2_evict_way_sel_S2 = `L2_WAY_%d;" % (i))
+    print("        end")
+%>
+    else
+    begin
+    case (l2_rb_bits_S2)
+<%
+for i in range(L2_WAYS):
+    print("    %d\'d%d:" % (L2_WAYS_WIDTH, i))
+    print("    begin")
+    for j in range(L2_WAYS):
+        if j == 0:
+            print("        if (!l2_lru_bits_S2[%d])" % ((j+i)%L2_WAYS))
+        elif j == L2_WAYS-1:
+            print("        else")
+        else:
+            print("        else if (!l2_lru_bits_S2[%d])" % ((j+i)%L2_WAYS))
+        print("        begin")
+        print("            l2_evict_way_sel_S2 = `L2_WAY_%d;" % ((j+i)%L2_WAYS))
+        print("        end")
+    print("    end")
+%>
+    default:
+    begin
+        l2_evict_way_sel_S2 = `L2_WAY_0;
     end
-
-    if (!found_invalid_S2) begin
-        min_freq_S2 = L2_FREQ_MAX_COUNT + 1; // Initialize higher than max possible frequency
-        min_freq_way_S2 = `L2_WAY_0;      // Default if somehow no valid way is found below (should not happen)
-        first_valid_found = 1'b0;
-
-        for (i = 0; i < `L2_WAYS; i = i + 1) begin
-             // Consider only valid ways for LFU comparison
-             way_is_valid = (state_way_S2[i][`L2_STATE_VD] == `L2_VD_CLEAN) || (state_way_S2[i][`L2_STATE_VD] == `L2_VD_DIRTY);
-             if (way_is_valid) begin
-                if (!first_valid_found || (freq_count_way_S2[i] < min_freq_S2)) begin
-                    min_freq_S2 = freq_count_way_S2[i];
-                    min_freq_way_S2 = i[`L2_WAYS_WIDTH-1:0];
-                    first_valid_found = 1'b1;
-                end
-             end
-        end
-
-        if (first_valid_found) begin
-            l2_evict_way_sel_S2 = min_freq_way_S2;
-        end
-
+    endcase
     end
 end
 
@@ -955,6 +922,7 @@ begin
         end
         else if (addr_S2[`L2_ADDR_TYPE] == `L2_ADDR_TYPE_STATE_ACCESS)
         begin
+        // State access is only available when L2_WAYS is less than 8
             <%
 if (L2_WAYS < 8):
     print("""if (addr_S2[`L2_ADDR_OP] == {`L2_ADDR_OP_WIDTH{1'b0}})
@@ -963,7 +931,7 @@ if (L2_WAYS < 8):
             end
             else""")
 %>            begin
-                return_data_S2 = {{(`L2_P1_DATA_BUF_IN_WIDTH - `L2_RB_BITS - `L2_LRU_BITS){1'b0}}, {`L2_RB_BITS{1'b0}}, {`L2_LRU_BITS{1'b0}} }; // Return 0s for unused LRU/RB bits
+                return_data_S2 = {{(`L2_P1_DATA_BUF_IN_WIDTH - `L2_RB_BITS - `L2_LRU_BITS){1'b0}}, l2_rb_bits_S2, l2_lru_bits_S2};
             end
         end
         else
@@ -1175,8 +1143,12 @@ begin
 end
 
 
+
+
 reg [`L2_OWNER_BITS-1:0] state_owner_S2;
 reg [`L2_SUBLINE_BITS-1:0] state_subline_S2;
+reg [`L2_RB_BITS-1:0] state_rb_S2;
+reg [`L2_LRU_BITS-1:0] state_lru_S2;
 
 always @ *
 begin
@@ -1258,14 +1230,45 @@ end
 
 always @ *
 begin
+    state_rb_S2 = l2_rb_bits_S2 + 1;
+end
+
+
+always @ *
+begin
+    if (state_lru_en_S2)
+    begin
+        if (state_lru_op_S2 == `L2_LRU_CLR)
+        begin
+            state_lru_S2 = l2_lru_bits_S2 & (~({{(`L2_LRU_BITS-1){1'b0}},1'b1} << l2_way_sel_S2));
+        end
+        else
+        begin
+            state_lru_S2 = l2_lru_bits_S2 | ({{(`L2_LRU_BITS-1){1'b0}},1'b1} << l2_way_sel_S2);
+            //clear all lru bits if they are all set
+            if (state_lru_S2 == {`L2_LRU_BITS{1'b1}})
+            begin
+                state_lru_S2 = {`L2_LRU_BITS{1'b0}};
+            end
+        end
+    end
+    else
+    begin
+        state_lru_S2 = l2_lru_bits_S2;
+    end
+end
+
+
+always @ *
+begin
     if (special_addr_type_S2)
     begin
         state_data_in_S2 = {msg_data_S2[`L2_RB_BITS+`L2_LRU_BITS-1:0], msg_data_S2[`L2_STATE_DATA_WIDTH-1:0]};
     end
     else
     begin
-        state_data_in_S2 = {{`L2_RB_BITS{1'b0}}, {`L2_LRU_BITS{1'b0}}, // Dummy values for unused RB/LRU
-                           {`L2_WAYS{state_mesi_S2, state_vd_S2, cache_type_S2, state_subline_S2, state_owner_S2}}};
+        state_data_in_S2 = {state_rb_S2, state_lru_S2,
+        {`L2_WAYS{state_mesi_S2, state_vd_S2, cache_type_S2, state_subline_S2, state_owner_S2}}};
     end
 end
 
@@ -1300,9 +1303,9 @@ begin
     end
     else
     begin
-        state_data_mask_in_S2 = {{`L2_RB_BITS{1'b0}}, // Mask off RB
-                                {`L2_LRU_BITS{1'b0}}, // Mask off LRU
-                                state_way_data_mask_in_S2}; // Keep existing per-way mask logic
+        state_data_mask_in_S2 = {{`L2_RB_BITS{state_rb_en_S2}},
+                                {`L2_LRU_BITS{state_lru_en_S2}},
+                                state_way_data_mask_in_S2};
     end
 end
 
@@ -1362,7 +1365,6 @@ reg [`L2_STATE_ARRAY_WIDTH-1:0] state_data_mask_in_S3_f;
 reg [`L2_DATA_INDEX_WIDTH-1:0] data_addr_S3_f;
 reg recycled_S3_f;
 reg data_clk_en_S3_f; // trin: added for stalled skid buffer
-reg [L2_FREQ_ARRAY_WIDTH-1:0] freq_data_S3_f;
 
 always @ (posedge clk)
 begin
@@ -1393,7 +1395,6 @@ begin
         data_addr_S3_f <= 0;
         recycled_S3_f <= 0;
         data_clk_en_S3_f <= 0;
-        freq_data_S3_f <= 0;
     end
     else if (!stall_S3)
     begin
@@ -1421,7 +1422,6 @@ begin
         state_data_mask_in_S3_f <= state_data_mask_in_S2;
         data_addr_S3_f <= data_addr_S2;
         recycled_S3_f <= recycled_S2_f;
-        freq_data_S3_f <= freq_data_trans_S2;
     end
     data_clk_en_S3_f <= (data_clk_en_S2 && valid_S2 && !stall_real_S2); // note: should not be qualified by stall_S3
 end
@@ -1464,7 +1464,6 @@ reg [`L2_STATE_ARRAY_WIDTH-1:0] state_data_mask_in_S4_f;
 reg [`L2_DATA_ARRAY_WIDTH-1:0] data_data_S4_f;
 reg [`L2_DATA_INDEX_WIDTH-1:0] data_addr_S4_f;
 reg recycled_S4_f;
-reg [L2_FREQ_ARRAY_WIDTH-1:0] freq_data_S4_f;
 
 reg data_stalled_skid_buffer_en_S3_f;
 reg [`L2_DATA_ARRAY_WIDTH-1:0] data_stalled_skid_buffer_S3_f;
@@ -1498,7 +1497,6 @@ begin
         data_data_S4_f <= 0;
         data_addr_S4_f <= 0;
         recycled_S4_f <= 0;
-        freq_data_S4_f <= 0;
     end
     else if (!stall_S4)
     begin
@@ -1527,7 +1525,6 @@ begin
         data_data_S4_f <= data_data_S3;
         data_addr_S4_f <= data_addr_S3_f;
         recycled_S4_f <= recycled_S3_f;
-        freq_data_S4_f <= freq_data_S3_f;
         if (data_stalled_skid_buffer_en_S3_f) begin
             data_data_S4_f <= data_stalled_skid_buffer_S3_f;
         end
@@ -1710,7 +1707,6 @@ end
 always @ *
 begin
     state_wr_addr_S4 = addr_S4_f[`L2_TAG_INDEX];
-    freq_wr_addr_S4 = addr_S4_f[`L2_TAG_INDEX];
 end
 
 always @ *
@@ -1789,45 +1785,6 @@ begin
     state_data_in_S4 = (state_data_in_S4_f & state_data_mask_in_S4_f) |
                        (state_data_in_real_S4 & state_data_mask_in_real_S4);
 end
-
-always @* begin
-    reg [L2_FREQ_BITS-1:0] current_freq_S4;
-    reg [L2_FREQ_BITS-1:0] next_freq_S4;
-    reg [L2_FREQ_ARRAY_WIDTH-1:0] freq_data_in_S4_calc;
-    reg freq_update_en_S4; 
-
-    freq_update_en_S4 = |(state_data_mask_in_S4_f[`L2_STATE_DATA] >> (l2_way_sel_S4_f * `L2_STATE_WAY_WIDTH)); // Check if any state bit for the selected way was intended to be written based on S2 logic
-
-    current_freq_S4 = freq_data_S4_f[L2_FREQ_BITS * l2_way_sel_S4_f +: L2_FREQ_BITS];
-
-    if (l2_tag_hit_S4_f) begin // On a hit (using pipelined hit signal)
-        if (current_freq_S4 >= L2_FREQ_MAX_COUNT) begin
-            next_freq_S4 = L2_FREQ_MAX_COUNT; 
-        end else begin
-            next_freq_S4 = current_freq_S4 + 1;
-        end
-    end else begin // On a miss/fill (installing in way l2_way_sel_S4_f)
-        if (freq_update_en_S4) begin // Only reset if we are actually performing a fill/write operation
-             next_freq_S4 = L2_FREQ_INIT_COUNT; 
-        end else begin
-             next_freq_S4 = current_freq_S4; 
-        end
-    end
-
-    freq_data_in_S4_calc = freq_data_S4_f; 
-    freq_data_in_S4_calc[L2_FREQ_BITS * l2_way_sel_S4_f +: L2_FREQ_BITS] = next_freq_S4;
-
-    if (freq_update_en_S4) begin
-        freq_data_in_S4 = freq_data_in_S4_calc;
-        // Create mask for the specific 6-bit counter
-        freq_data_mask_in_S4 = {(L2_FREQ_ARRAY_WIDTH){1'b0}}; 
-        freq_data_mask_in_S4 = {{(L2_FREQ_ARRAY_WIDTH - L2_FREQ_BITS){1'b0}}, {L2_FREQ_BITS{1'b1}}} << (l2_way_sel_S4_f * L2_FREQ_BITS);
-    end else begin
-        freq_data_in_S4 = {(L2_FREQ_ARRAY_WIDTH){1'b0}}; 
-        freq_data_mask_in_S4 = {(L2_FREQ_ARRAY_WIDTH){1'b0}}; 
-    end
-end
-
 
 reg [`L2_DATA_ARRAY_WIDTH-1:0] data_data_buf_S4_f;
 reg [`L2_DATA_ARRAY_WIDTH-1:0] data_data_buf_S4_next;
